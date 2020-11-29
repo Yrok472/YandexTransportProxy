@@ -73,4 +73,4 @@ WORKDIR /home/transport_proxy
 # Setting up entry point for this container, it's designed to run as an executable.
 # ENTRYPOINT HERE
 USER transport_proxy:transport_proxy
-CMD /usr/bin/python3 /home/transport_proxy/transport_proxy.py
+CMD /usr/bin/python3 /home/transport_proxy/transport_proxy.py --delay 10 --verbose 4
