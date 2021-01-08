@@ -1,6 +1,6 @@
 # Yandex Transport Proxy
 
-**Build status:** ![Build Status](http://owlsoul.biz.tm/YandexTransportProxy/status.php?test=build)
+**UPD 08-01-2021:** Эта штука все еще живая, но теперь получение данных занимает 30 секунд (здоровый такой костыль чтобы хоть как работало), теперь метод getStopInfo - тот самый который нужен для расписания по остановке - походу дергается не сразу при загрузке страницы, и его прихоится ждать.
 
 A proxy server to work in conjunction with [YandexTransportWebdriverAPI-Python](https://github.com/OwlSoul/YandexTransportWebdriverAPI-Python).
 
@@ -53,7 +53,7 @@ A proxy server to work in conjunction with [YandexTransportWebdriverAPI-Python](
 
 Определенная стабильная версия:
 
-```docker pull owlsoul/ytproxy:1.0.0```
+```docker pull owlsoul/ytproxy:1.0.2```
 
 Нестабильная истекающая багами "Dev" версия:
 
