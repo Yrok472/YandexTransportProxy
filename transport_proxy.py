@@ -462,7 +462,7 @@ class Application:
         :return:
         """
         self.log.info("SIGTERM received! Terminating the program...")
-        self.sigterm_handler(_signal, _time)
+        self.sigint_handler(_signal, _time)
 
     def sigint_handler(self, _signal, _time):
         """
@@ -504,7 +504,7 @@ class Application:
 
         while self.is_running:
             # Checking if Executor Thread is dead.
-            if not self.executor_thread.isAlive():
+            if not self.executor_thread.is_alive():
                 self.log.error("Executor thread is dead. Terminating the program.")
                 self.is_running = False
                 break
