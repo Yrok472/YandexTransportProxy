@@ -48,6 +48,10 @@ class YandexTransportCore:
         
         # Cache currently loaded URL to optimize repeated queries
         self.current_url = None
+        
+        # Multi-tab support for preload cache
+        self.tabs = {}  # {url: window_handle}
+        self.main_tab = None
 
     def start_webdriver(self):
         """
@@ -67,6 +71,9 @@ class YandexTransportCore:
         # Use webdriver-manager to automatically download and manage chromedriver
         service = Service(ChromeDriverManager().install())
         self.driver = webdriver.Chrome(service=service, options=chrome_options)
+        
+        # Store main tab handle
+        self.main_tab = self.driver.current_window_handle
 
     def stop_webdriver(self):
         """
@@ -104,6 +111,59 @@ class YandexTransportCore:
             return 'getLayerRegions'
 
         return method
+
+    def create_tab_for_url(self, url):
+        """
+        Create a new tab for the given URL (for preload cache)
+        :param url: URL to load in new tab
+        :return: window handle of new tab
+        """
+        if self.driver is None:
+            return None
+        
+        # Open new tab
+        self.driver.execute_script("window.open('');")
+        # Switch to new tab
+        new_tab = self.driver.window_handles[-1]
+        self.driver.switch_to.window(new_tab)
+        
+        # Store tab handle
+        self.tabs[url] = new_tab
+        
+        if self.log:
+            self.log.debug(f"Created tab for URL: {url}")
+        
+        return new_tab
+    
+    def switch_to_tab(self, url):
+        """
+        Switch to existing tab for URL
+        :param url: URL whose tab to switch to
+        :return: True if switched, False if tab not found
+        """
+        if url not in self.tabs:
+            return False
+        
+        try:
+            self.driver.switch_to.window(self.tabs[url])
+            return True
+        except Exception as e:
+            if self.log:
+                self.log.warning(f"Failed to switch to tab for {url}: {e}")
+            # Remove stale tab handle
+            del self.tabs[url]
+            return False
+    
+    def switch_to_main_tab(self):
+        """
+        Switch back to main tab
+        """
+        if self.main_tab:
+            try:
+                self.driver.switch_to.window(self.main_tab)
+            except Exception as e:
+                if self.log:
+                    self.log.warning(f"Failed to switch to main tab: {e}")
 
     def get_chromium_networking_data(self):
         """

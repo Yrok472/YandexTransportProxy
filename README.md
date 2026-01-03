@@ -149,6 +149,93 @@ docker-compose up -d
 
 ```python3 transport_proxy.py --host 127.0.0.1 --port 35555 --delay 15 --verbose 4```
 
+## Preload Cache (v1.2.0) - Мгновенные ответы для избранных остановок
+
+Начиная с версии 1.2.0 сервер поддерживает **preload cache** - фоновое обновление данных для списка избранных остановок.
+
+### Как это работает:
+- Второй Chrome в фоне постоянно обновляет данные для указанных остановок (каждые 30 секунд по умолчанию)
+- Запросы к этим остановкам возвращаются **мгновенно** (<1 секунда) из кэша
+- Обычные запросы работают как прежде (~15-30 секунд)
+- Полная независимость - preload не блокирует основные запросы
+
+### Конфигурация (watched_stops.json):
+```json
+{
+  "enabled": true,
+  "refresh_interval": 30,
+  "cache_ttl": 120,
+  "stops": [
+    {
+      "name": "Метро Войковская",
+      "url": "https://yandex.ru/maps/...",
+      "methods": ["getStopInfo"]
+    }
+  ]
+}
+```
+
+### Параметры:
+- **enabled**: включить/выключить preload cache
+- **refresh_interval**: интервал обновления в секундах (default: 30)
+- **cache_ttl**: время жизни кэша в секундах (default: 120)
+- **stops**: список остановок для мониторинга (рекомендуется 3-5 остановок)
+
+### Запуск с preload:
+```bash
+# Использовать конфиг по умолчанию (watched_stops.json)
+python3 transport_proxy.py --verbose 4
+
+# Указать другой конфиг
+python3 transport_proxy.py --preload-config /path/to/config.json --verbose 4
+```
+
+### Docker с preload:
+```bash
+# Linux/Mac - примонтировать конфиг в контейнер
+docker run -it -p 25555:25555 \
+  -v $(pwd)/watched_stops.json:/home/transport_proxy/watched_stops.json:ro \
+  owlsoul/ytproxy:latest
+
+# Windows PowerShell - абсолютный путь
+docker run -it -p 25555:25555 `
+  -v ${PWD}/watched_stops.json:/home/transport_proxy/watched_stops.json:ro `
+  owlsoul/ytproxy:latest
+
+# Windows CMD
+docker run -it -p 25555:25555 ^
+  -v "%CD%\watched_stops.json:/home/transport_proxy/watched_stops.json:ro" ^
+  owlsoul/ytproxy:latest
+
+# WSL из PowerShell (из директории проекта)
+# Сначала перейти в директорию проекта в PowerShell:
+# cd C:\path\to\YandexTransportProxy
+
+wsl bash -c 'cd /mnt/c/path/to/YandexTransportProxy && docker run --rm -p 25555:25555 \
+  -v "$(pwd)/watched_stops.json:/home/transport_proxy/watched_stops.json:ro" \
+  ytp:latest'
+
+# Или с абсолютным путём (из любой директории)
+wsl bash -c 'docker run --rm -p 25555:25555 \
+  -v "/mnt/c/path/to/YandexTransportProxy/watched_stops.json:/home/transport_proxy/watched_stops.json:ro" \
+  ytp:latest'
+```
+
+**Важно для WSL:** 
+- Путь к файлу должен быть `/mnt/c/...` (Windows диск C: в WSL)
+- Target path **всегда** `/home/transport_proxy/watched_stops.json` (рабочая директория контейнера)
+- Флаг `:ro` (read-only) защищает конфиг от изменений внутри контейнера
+
+### Ресурсы:
+- **Память:** +800 MB (второй Chrome процесс)
+- **CPU:** +20-30%
+- **Вкладки:** N вкладок = N остановок в списке
+
+### Отключение preload:
+- Установить `"enabled": false` в JSON
+- Удалить файл watched_stops.json
+- Сервер продолжит работать в обычном режиме
+
 ## Остановка прокси-сервера
 
 Прокси-сервер прекращает свою жизнедеятельность при получении сигнала SIGINT или SIGTERM. В случае с Docker'изированным приложением можно его просто остановить (```docker stop```), вы все равно не услышите как прокси-сервер горит в аду завершающегося контейнера.

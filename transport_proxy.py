@@ -179,23 +179,22 @@ class ExecutorThread(threading.Thread):
         :param query: internal 'query' dictionary
         :return: result as JSON
         """
-        if query['type'] == 'getStopInfo':
-            data, error = self.app.core.get_stop_info(url=query['body'])
-        elif query['type'] == 'getRouteInfo':
-            data, error = self.app.core.get_route_info(url=query['body'])
-        elif query['type'] == 'getLine':
-            data, error = self.app.core.get_line(url=query['body'])
-        elif query['type'] == 'getVehiclesInfo':
-            data, error = self.app.core.get_vehicles_info(url=query['body'])
-        elif query['type'] == 'getVehiclesInfoWithRegion':
-            data, error = self.app.core.get_vehicles_info_with_region(url=query['body'])
-        elif query['type'] == 'getLayerRegions':
-            data, error = self.app.core.get_layer_regions(url=query['body'])
-        elif query['type'] == 'getAllInfo':
-            data, error = self.app.core.get_all_info(url=query['body'])
+        url = query['body']
+        
+        # Check preload cache first
+        if self.app.preload_worker:
+            cached_data, cached_error = self.app.preload_worker.get_cached_data(url)
+            if cached_data is not None:
+                self.app.log.debug(f"Using preload cache for {url}")
+                data, error = cached_data, cached_error
+            else:
+                # Not in cache, use normal path
+                data, error = self._execute_get_info_normal(query)
         else:
-            return
-
+            # No preload, use normal path
+            data, error = self._execute_get_info_normal(query)
+        
+        # Process payload (same for both cached and normal paths)
         payload = []
         if error == YandexTransportCore.RESULT_OK:
             for entry in data:
@@ -236,6 +235,29 @@ class ExecutorThread(threading.Thread):
 
         for entry in payload:
             self.send_message(json.dumps(entry), query['addr'], query['conn'], log_tag=entry['method'])
+    
+    def _execute_get_info_normal(self, query):
+        """
+        Execute get_info using normal Chrome (non-cached path)
+        :param query: internal 'query' dictionary
+        :return: (data, error) tuple
+        """
+        if query['type'] == 'getStopInfo':
+            return self.app.core.get_stop_info(url=query['body'])
+        elif query['type'] == 'getRouteInfo':
+            return self.app.core.get_route_info(url=query['body'])
+        elif query['type'] == 'getLine':
+            return self.app.core.get_line(url=query['body'])
+        elif query['type'] == 'getVehiclesInfo':
+            return self.app.core.get_vehicles_info(url=query['body'])
+        elif query['type'] == 'getVehiclesInfoWithRegion':
+            return self.app.core.get_vehicles_info_with_region(url=query['body'])
+        elif query['type'] == 'getLayerRegions':
+            return self.app.core.get_layer_regions(url=query['body'])
+        elif query['type'] == 'getAllInfo':
+            return self.app.core.get_all_info(url=query['body'])
+        else:
+            return None, YandexTransportCore.RESULT_GET_ERROR
 
     def execute_get_echo(self, query):
         """
@@ -401,6 +423,117 @@ class ExecutorThread(threading.Thread):
 # -------------------------------------------------------------------------------------------------------------------- #
 
 
+class PreloadWorker(threading.Thread):
+    """
+    Preload worker thread - continuously refreshes watched stops in background
+    """
+    def __init__(self, app, preload_core, config):
+        super().__init__()
+        self.app = app
+        self.core = preload_core  # Separate Chrome instance
+        self.config = config
+        self.cache = {}  # {url: {'data': [...], 'timestamp': float, 'error': int}}
+        self.cache_lock = threading.Lock()
+        self.is_running = True
+        
+    def get_cached_data(self, url):
+        """
+        Get cached data for URL if fresh enough
+        :param url: URL to look up
+        :return: (data, error) tuple or (None, None) if not found/stale
+        """
+        with self.cache_lock:
+            if url not in self.cache:
+                return None, None
+            
+            entry = self.cache[url]
+            age = time.time() - entry['timestamp']
+            
+            # Check if cache is still valid (TTL)
+            if age > self.config.get('cache_ttl', 120):
+                self.app.log.debug(f"Cache expired for {url} (age: {age:.1f}s)")
+                return None, None
+            
+            self.app.log.debug(f"Cache hit for {url} (age: {age:.1f}s)")
+            return entry['data'], entry['error']
+    
+    def update_cache(self, url, data, error):
+        """
+        Update cache entry
+        :param url: URL key
+        :param data: Data to cache
+        :param error: Error code
+        """
+        with self.cache_lock:
+            self.cache[url] = {
+                'data': data,
+                'timestamp': time.time(),
+                'error': error
+            }
+    
+    def preload_stop(self, stop):
+        """
+        Load data for one stop into cache
+        :param stop: Stop configuration dict
+        """
+        url = stop['url']
+        methods = tuple(f"maps/api/masstransit/{m}" for m in stop['methods'])
+        
+        self.app.log.debug(f"Preloading stop: {stop['name']} ({url})")
+        
+        try:
+            # Check if tab exists for this URL
+            if url not in self.core.tabs:
+                # Create new tab
+                self.core.create_tab_for_url(url)
+            else:
+                # Switch to existing tab
+                self.core.switch_to_tab(url)
+            
+            # Get fresh data
+            data, error = self.core._get_yandex_json(url, methods)
+            
+            # Update cache
+            self.update_cache(url, data, error)
+            
+            if error == 0:
+                self.app.log.debug(f"Successfully preloaded {stop['name']}: {len(data) if data else 0} items")
+            else:
+                self.app.log.warning(f"Failed to preload {stop['name']}: error {error}")
+                
+        except Exception as e:
+            self.app.log.error(f"Exception preloading {stop['name']}: {e}")
+            # Keep old cache if update fails
+    
+    def run(self):
+        """
+        Main preload loop
+        """
+        self.app.log.info("PreloadWorker thread started")
+        
+        # Initial load - create tabs for all stops
+        for stop in self.config['stops']:
+            self.preload_stop(stop)
+        
+        # Continuous refresh loop
+        while self.is_running and self.app.is_running:
+            time.sleep(self.config['refresh_interval'])
+            
+            if not self.is_running:
+                break
+            
+            # Refresh all stops
+            for stop in self.config['stops']:
+                if not self.is_running:
+                    break
+                self.preload_stop(stop)
+        
+        self.app.log.info("PreloadWorker thread terminated")
+
+
+# -------------------------------------------------------------------------------------------------------------------- #
+
+
 class Application:
     """
     Main application class
@@ -453,6 +586,12 @@ class Application:
 
         # Server will run in single thread, the deque is to store incoming queries.
         self.query_queue = deque()
+        
+        # Preload cache configuration
+        self.preload_config = None
+        self.preload_core = None
+        self.preload_worker = None
+        self.preload_config_file = 'watched_stops.json'
 
     def sigterm_handler(self, _signal, _time):
         """
@@ -474,6 +613,11 @@ class Application:
         self.log.info("SIGINT received! Terminating the program...")
         self.watch_lock = False
         self.is_running = False
+        
+        # Stop preload worker if running
+        if self.preload_worker:
+            self.log.info("Stopping PreloadWorker...")
+            self.preload_worker.is_running = False
         self.log.info("Waiting for threads to terminate...")
         copy_listeners = self.listeners.copy()
         # pylint: disable = W0612
@@ -674,6 +818,38 @@ class Application:
         response = {"response": "ERROR", "message": "Unknown query"}
         response_json = json.dumps(response)
         conn.send(bytes(response_json + '\n' + '\0', 'utf-8'))
+    
+    def load_preload_config(self):
+        """
+        Load preload configuration from JSON file
+        :return: True if loaded successfully, False otherwise
+        """
+        try:
+            import os
+            if not os.path.exists(self.preload_config_file):
+                self.log.info(f"Preload config not found: {self.preload_config_file}")
+                return False
+            
+            with open(self.preload_config_file, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            
+            if not config.get('enabled', False):
+                self.log.info("Preload cache disabled in config")
+                return False
+            
+            if not config.get('stops'):
+                self.log.warning("No stops defined in preload config")
+                return False
+            
+            self.preload_config = config
+            self.log.info(f"Loaded preload config: {len(config['stops'])} stops, "
+                         f"interval={config.get('refresh_interval', 30)}s, "
+                         f"ttl={config.get('cache_ttl', 120)}s")
+            return True
+            
+        except Exception as e:
+            self.log.error(f"Failed to load preload config: {e}")
+            return False
 
     def parse_arguments(self):
         """
@@ -710,6 +886,9 @@ class Application:
                             "Use this to lower the load on Yandex Maps " +
                             "and avoid possible ban for\n"
                             "too many queries in short amount of time.")
+        parser.add_argument("--preload-config", default=self.preload_config_file,
+                            help="path to preload configuration file (JSON), default is " +
+                            str(self.preload_config_file))
 
         args = parser.parse_args()
         if args.version:
@@ -720,6 +899,7 @@ class Application:
         self.port = int(args.port)
         self.log.verbose = int(args.verbose)
         self.query_delay = int(args.delay)
+        self.preload_config_file = str(args.preload_config)
 
     def run(self):
         """
@@ -750,6 +930,19 @@ class Application:
         self.log.info("Starting ChromeDriver...")
         self.core.start_webdriver()
         self.log.info("ChromeDriver started successfully!")
+        
+        # Load and start preload worker if configured
+        if self.load_preload_config():
+            self.log.info("Starting preload ChromeDriver...")
+            self.preload_core = YandexTransportCore(self.log.verbose)
+            self.preload_core.start_webdriver()
+            self.log.info("Preload ChromeDriver started successfully!")
+            
+            self.preload_worker = PreloadWorker(self, self.preload_core, self.preload_config)
+            self.preload_worker.start()
+            self.log.info("PreloadWorker started")
+        else:
+            self.log.info("Preload cache not enabled")
 
         # Start the process of listening and accepting incoming connections.
         result = self.listen()
