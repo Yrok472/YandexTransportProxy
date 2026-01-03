@@ -2,8 +2,8 @@
 # Architectures: armhf (Orange PI, Raspberry PI)
 #                x86-64
 
-# Use Ubuntu 18.04 as basis
-FROM ubuntu:18.04
+# Use Ubuntu 24.04 as basis (Python 3.12)
+FROM ubuntu:24.04
 
 # ----- CHANGE THESE ARGUMENTS TO YOUR DESIRES ----- #
 # -- ИЗМЕНИТЕ ДАННЫЕ АРГУМЕНТЫ ДЛЯ ВАШЕЙ СИТУАЦИИ -- #
@@ -21,9 +21,8 @@ RUN apt-get update && \
     apt-get install -y \
     locales \
     tzdata \
-    # Chromium and chromedriver, latest versions.
-    chromium-browser \
-    chromium-chromedriver \
+    wget \
+    gnupg \
     # Because life can't be easy, isn't it?
     # psycopg2-binary refuses to install on armhf without this thing.
     libpq-dev \
@@ -37,15 +36,24 @@ RUN apt-get update && \
     # Install python3-pip
     python3-pip
 
+# Install Google Chrome instead of Chromium
+RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - && \
+    echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list && \
+    apt-get update && \
+    apt-get install -y google-chrome-stable
+
 # Install required python packages
-RUN pip3 install psycopg2-binary \
+RUN pip3 install --break-system-packages \
+                 psycopg2-binary \
                  selenium \
                  setproctitle \
                  beautifulsoup4 \
-                 lxml
+                 lxml \
+                 webdriver-manager
 
 # Install pytest, separately, so previous step will be cached
-RUN pip3 install pytest \
+RUN pip3 install --break-system-packages \
+                 pytest \
                  pytest-progress \
                  pytest-rerunfailures \
                  pytest-timeout
@@ -53,9 +61,9 @@ RUN pip3 install pytest \
 # Dealing with goddamn locales
 RUN sed -i -e 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && \
     locale-gen
-ENV LANG en_US.UTF-8  
-ENV LANGUAGE en_US:en  
-ENV LC_ALL en_US.UTF-8
+ENV LANG=en_US.UTF-8
+ENV LANGUAGE=en_US:en
+ENV LC_ALL=en_US.UTF-8
 
 # Setting the goddamn TimeZone
 ENV TZ=${timezone}
@@ -83,4 +91,4 @@ WORKDIR /home/transport_proxy
 # Setting up entry point for this container, it's designed to run as an executable.
 # ENTRYPOINT HERE
 USER transport_proxy:transport_proxy
-CMD /home/transport_proxy/execute_tests.sh
+CMD ["/bin/bash", "/home/transport_proxy/execute_tests.sh"]
