@@ -1,6 +1,8 @@
 # Yandex Transport Proxy
 
-**UPD 08-01-2021:** Эта штука все еще живая, но теперь получение данных занимает 30 секунд (здоровый такой костыль чтобы хоть как работало), теперь метод getStopInfo - тот самый который нужен для расписания по остановке - походу дергается не сразу при загрузке страницы, и его прихоится ждать.
+**UPD 03-01-2026:** Проблема с 30-секундной задержкой решена! Добавлен Preload Cache механизм, который обеспечивает мгновенные ответы (<1 сек) для избранных остановок через фоновое обновление данных. Решение доступно в форке: https://github.com/Yrok472/YandexTransportProxy
+
+**UPD 08-01-2021:** ~~Эта штука все еще живая, но теперь получение данных занимает 30 секунд (здоровый такой костыль чтобы хоть как работало), теперь метод getStopInfo - тот самый который нужен для расписания по остановке - походу дергается не сразу при загрузке страницы, и его прихоится ждать.~~ *(Решено в версии 1.2.0)*
 
 A proxy server to work in conjunction with [YandexTransportWebdriverAPI-Python](https://github.com/OwlSoul/YandexTransportWebdriverAPI-Python).
 
@@ -254,7 +256,8 @@ The code is distributed under MIT licence, AS IS, author do not bear any respons
 ## Зал славы / Credits
 __Project author:__ [Yury D.](https://github.com/OwlSoul) (TheOwlSoul@gmail.com) \
 __PEP-8 Evangelist, Good Cop:__ [Pavel Lutskov](https://github.com/ltskv) \
-__PEP-8 Evangelist, Bad Cop:__ [Yury Alexeev](https://github.com/Kuma-San0217)
+__PEP-8 Evangelist, Bad Cop:__ [Yury Alexeev](https://github.com/Kuma-San0217) \
+__Preload Cache & Performance:__ [Yury S.](https://github.com/Yrok472/)
 
 ----
 
