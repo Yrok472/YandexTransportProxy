@@ -72,6 +72,7 @@ RUN useradd transport_proxy --home /home/transport_proxy --shell /bin/bash
 # Copying the project
 ADD yandex_transport_core/*.py /home/transport_proxy/yandex_transport_core/
 ADD transport_proxy.py /home/transport_proxy
+ADD watched_stops.json /home/transport_proxy/
 
 # Setting permissions
 RUN chown -R transport_proxy:transport_proxy /home/transport_proxy
@@ -80,4 +81,4 @@ WORKDIR /home/transport_proxy
 # Setting up entry point for this container, it's designed to run as an executable.
 # ENTRYPOINT HERE
 USER transport_proxy:transport_proxy
-CMD ["/usr/bin/python3", "/home/transport_proxy/transport_proxy.py", "--verbose", "4"]
+CMD ["/usr/bin/python3", "/home/transport_proxy/transport_proxy.py", "--verbose", "3"]

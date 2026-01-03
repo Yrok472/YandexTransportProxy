@@ -14,3 +14,4 @@ debug
 ytproxy-network.log
 plots
 .vscode/settings.json
+build_ytp_image.sh
