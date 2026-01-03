@@ -89,7 +89,7 @@ def test_get_chromium_networking_data():
     print("Stop name:", url['url'])
     core.driver.get(url['url'])
     # Getting Chromium Network Data
-    data = json.loads(core.get_chromium_networking_data())
+    data = core.get_chromium_networking_data()
     found_input_url = False
     for entry in data:
         if entry['name'] == url['url']:

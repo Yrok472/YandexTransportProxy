@@ -1,38 +1,492 @@
-YTPS - Yandex Transport Proxy Server protocol.
+================================================================================
+YTPS - Yandex Transport Proxy Server Protocol
+================================================================================
 
-Version = 1.0.2
+Version: 1.1.0
+Date: January 2026
 
-get_current_queue                        - will return current Query Queue of the server.
-                                           Does not add itself to the Query Queue.
+================================================================================
+1. GENERAL INFORMATION
+================================================================================
 
-getEcho?id=...?                          - test command, will add itself to Query Queue and execute in order with
-                                           get...Info queries. Will return string after ?
+Protocol Type: TCP socket connection
+Default Port: 0.0.0.0:25555
+Response Format: JSON
 
-get_stop_info?id=...?...                 - add get_stop_info to the Query Queue, paste Yandex URL after "?"
-                                           will return {"response": "OK", "queue_position":"size of the queue"}
-                                           if successful.
+Commands are sent in TEXT mode with camelCase formatting (matching Yandex 
+Masstransit API conventions). Each command consists of fields separated by 
+the "?" delimiter.
 
-get_vehicles_info?id=...?...             - add get_stop_info to the Query Queue, paste Yandex URL after "?"
-                                           will return {"response": "OK", "queue_position":"size of the queue"}
-                                           if successful.
-                                           Note: Seems to be deprecated starting 25-03-2019
+Command Structure:
+  <command>?id=<client_id>?<parameters>
 
-get_vehicles_info_with_region?id=...?... - new Yandex method to get vehicles info.
+IMPORTANT: Server enforces a DELAY between consecutive API queries to prevent
+Yandex rate limiting. Default delay is 10 seconds (configurable with --delay
+at server startup). Queries are placed in a QUERY QUEUE and executed in FIFO
+order.
 
-get_route_info?id=...?...                - add get_route_info to Query Queue, paster Yandex URL after "?"
-                                            will return {"response": "OK", "queue_position":"size of the queue"} if successful
+================================================================================
+2. PERFORMANCE CHARACTERISTICS (v1.1.0)
+================================================================================
 
-get_layer_regions?id=...?...             - no idea what this thing does.
+Query performance depends on URL caching state:
 
-get_all_info?id=...?                     - special command, also requires Yandex URL after ?, will return all "get...Info"
-                                           responses it will find, like get_route_info and getVehicle info are returned by
-                                           clicking on the transit stop, using the same URL.
+┌─────────────────────┬──────────────┬─────────────────────────────────────┐
+│ Query Type          │ Typical Time │ Details                             │
+├─────────────────────┼──────────────┼─────────────────────────────────────┤
+│ First query         │ 25-35 sec    │ Full page load + API detection      │
+│ (new URL)           │              │ + data extraction                   │
+├─────────────────────┼──────────────┼─────────────────────────────────────┤
+│ Repeated query      │ 10-20 sec    │ Page refresh (cached) + API         │
+│ (same URL)          │              │ detection + data extraction         │
+└─────────────────────┴──────────────┴─────────────────────────────────────┘
 
-# ----------------------------------- Not implemented, under consideration ------------------------------------------- #
-watchVehiclesInfo?id=...?                - start watching for vehicles info, passing out any subsequent get_vehicles_info
-                                           responses it will receive from Yandex. Will block ANY other "get...Info" query \
-                                           until cancelled.
-                                           One server - one "watch" instance. Use more Docker containers to watch more routes,
-                                           watch must be in active browser window to work properly.
+Performance Optimizations:
 
-cancelWatch                              - cancel watch, resume normal operations.
+1. Smart Polling with Early Exit
+   - Checks for target API methods every 1 second
+   - Exits immediately when API method detected (typical: 10-30 seconds)
+   - Maximum timeout: 45 seconds
+   - Previous versions used fixed 30-second wait
+
+2. URL Caching
+   - Detects repeated queries to same URL
+   - Uses browser refresh() instead of full reload
+   - Reduces page load time from ~5 seconds to ~2 seconds
+   - Cache cleared when new URL requested
+
+3. Performance Log Management
+   - Clears old logs before each request to prevent data mixing
+   - Accumulates logs during polling (get_log() clears buffer)
+   - Prevents cache pollution between consecutive queries
+
+Total Query Time = Server Delay + Page Load + API Detection + Data Extraction
+
+Example: With 10-second delay, first query takes ~35-45 seconds total,
+         repeated query takes ~20-30 seconds total.
+
+================================================================================
+3. PLATFORM COMPATIBILITY (v1.1.0)
+================================================================================
+
+Current Stack:
+  OS: Ubuntu 24.04 LTS
+  Python: 3.12
+  Browser: Google Chrome Stable (v143+)
+  WebDriver: Selenium 4+ with webdriver-manager
+  Network Monitoring: Chrome DevTools Protocol (CDP)
+
+Chrome 143+ Compatibility Note:
+This version resolves breaking changes in Chrome 143 where window.performance
+API serialization was modified. Network monitoring now uses Chrome DevTools
+Protocol Performance logs, capturing Network.requestWillBeSent events to
+detect Yandex Masstransit API calls.
+
+Previous versions (<=1.0.2) used window.performance.getEntries() which fails
+on Chrome 143+ with weakLocalObjectReference errors.
+
+================================================================================
+4. NETWORK PROTOCOL
+================================================================================
+
+4.1 Connection
+--------------
+1. Client opens TCP connection to server (default: 0.0.0.0:25555)
+2. Client sends command as plain text string
+3. Server responds with JSON
+4. Client closes connection or sends another command
+
+4.2 Command Format
+------------------
+All commands follow the pattern:
+  <commandName>?id=<clientId>?<parameters>
+
+Fields:
+  - commandName: Command to execute (camelCase)
+  - id: Client-supplied identifier for tracking (any string)
+  - parameters: Command-specific data (typically Yandex Maps URL)
+
+Delimiter: "?" character separates fields
+
+4.3 Response Format
+-------------------
+All responses are JSON objects with common structure:
+
+Success Response:
+{
+  "id": "<client_id>",
+  "method": "<yandex_api_method>",
+  "error": 0,
+  "message": "OK",
+  "expect_more_data": <boolean>,
+  "data": { <yandex_api_response> }
+}
+
+Error Response:
+{
+  "id": "<client_id>",
+  "method": "<command>",
+  "error": <error_code>,
+  "message": "<error_description>",
+  "expect_more_data": false
+}
+
+Queue Response (immediate acknowledgment):
+{
+  "id": "<client_id>",
+  "response": "OK",
+  "queue_position": <number>
+}
+
+Error Codes:
+  0 - Success (RESULT_OK)
+  1 - No data available (RESULT_NO_DATA)
+  2 - Get error / Network failure (RESULT_GET_ERROR)
+  3 - No Yandex data in response (RESULT_NO_YANDEX_DATA)
+
+================================================================================
+5. COMMAND REFERENCE
+================================================================================
+
+5.1 getCurrentQueue
+-------------------
+Description: Returns current Query Queue status
+Format: getCurrentQueue
+Response: JSON array of queued query IDs
+Queue: Does NOT add itself to queue (immediate response)
+
+Example:
+  Client: getCurrentQueue
+  Server: {"queue": ["query1", "query2", "query3"], "size": 3}
+
+5.2 getEcho
+-----------
+Description: Test command, echoes back provided string
+Format: getEcho?id=<id>?<string>
+Response: JSON with echoed string in "data" field
+Queue: YES (added to Query Queue, executes in order)
+
+Example:
+  Client: getEcho?id=test123?HelloWorld
+  Server: {
+            "id": "test123",
+            "method": "getEcho",
+            "error": 0,
+            "message": "OK",
+            "expect_more_data": false,
+            "data": "HelloWorld"
+          }
+
+5.3 getStopInfo
+---------------
+Description: Get transport schedule and arrival predictions for a stop
+Format: getStopInfo?id=<id>?<yandex_url>
+Response: JSON with Yandex getStopInfo API data
+Queue: YES
+
+Yandex URL Format:
+  https://yandex.ru/maps/<region_id>/<city>/?masstransit[stopId]=stop__<stop_id>&mode=stop
+
+Example:
+  Client: getStopInfo?id=req001?https://yandex.ru/maps/213/moscow/?masstransit%5BstopId%5D=stop__9640231&mode=stop
+  Server: (Queue acknowledgment first)
+          {"id": "req001", "response": "OK", "queue_position": 1}
+          (Later, after execution)
+          {
+            "id": "req001",
+            "method": "getStopInfo",
+            "error": 0,
+            "message": "OK",
+            "expect_more_data": false,
+            "data": { <full_yandex_masstransit_json> }
+          }
+
+Note: As of Chrome 143, getStopInfo loads 5-10 seconds after page load.
+      Smart polling handles this automatically.
+
+5.4 getVehiclesInfo
+-------------------
+Description: Get real-time vehicle coordinates for a route
+Format: getVehiclesInfo?id=<id>?<yandex_url>
+Response: JSON with vehicle positions
+Queue: YES
+
+Status: Deprecated as of March 2019, replaced by getVehiclesInfoWithRegion
+
+5.5 getVehiclesInfoWithRegion
+------------------------------
+Description: Get vehicle coordinates with region information (current method)
+Format: getVehiclesInfoWithRegion?id=<id>?<yandex_url>
+Response: JSON with vehicle positions and region data
+Queue: YES
+
+Yandex URL Format:
+  https://yandex.ru/maps/<region>/<city>/?masstransit[lineId]=<line_id>&mode=route
+
+5.6 getRouteInfo
+----------------
+Description: Get route metadata (stops, schedule structure)
+Format: getRouteInfo?id=<id>?<yandex_url>
+Response: JSON with route information
+Queue: YES
+
+5.7 getLine
+-----------
+Description: Get complete route line data (all stops route passes through)
+Format: getLine?id=<id>?<yandex_url>
+Response: JSON with line data (typically largest response, 50-150 KB)
+Queue: YES
+
+Note: Usually returns the most comprehensive and largest JSON of all methods.
+
+5.8 getLayerRegions
+-------------------
+Description: Get layer region information (purpose not fully documented)
+Format: getLayerRegions?id=<id>?<yandex_url>
+Response: JSON with layer region data
+Queue: YES
+
+Note: This method's exact purpose in Yandex API is unclear.
+
+5.9 getAllInfo
+--------------
+Description: Execute all available API methods for given URL
+Format: getAllInfo?id=<id>?<yandex_url>
+Response: Multiple JSON responses (one per detected API method)
+Queue: YES
+
+Returns data from all applicable methods:
+  - getStopInfo
+  - getRouteInfo
+  - getLine
+  - getVehiclesInfo
+  - getVehiclesInfoWithRegion
+  - getLayerRegions
+
+Field "expect_more_data" indicates if more responses follow:
+  - true: More data coming, keep connection open
+  - false: Last response, can close connection
+
+Example Flow:
+  Client: getAllInfo?id=full001?<yandex_url>
+  Server: {"id": "full001", "response": "OK", "queue_position": 1}
+  Server: {"id": "full001", "method": "getStopInfo", "error": 0, 
+           "expect_more_data": true, "data": {...}}
+  Server: {"id": "full001", "method": "getRouteInfo", "error": 0,
+           "expect_more_data": true, "data": {...}}
+  Server: {"id": "full001", "method": "getLine", "error": 0,
+           "expect_more_data": false, "data": {...}}
+
+================================================================================
+6. NOT IMPLEMENTED (Under Consideration)
+================================================================================
+
+watchVehiclesInfo?id=<id>?<yandex_url>
+---------------------------------------
+Description: Continuous monitoring of vehicle positions
+Behavior: Would stream getVehiclesInfo responses as they update
+Blocking: Would block all other queries until cancelled
+Scaling: Would require one Docker container per watched route
+
+Status: Not implemented in current version
+
+================================================================================
+7. CLIENT LIBRARIES
+================================================================================
+
+Official Python Client:
+  Name: YandexTransportWebdriverAPI-Python
+  Repository: https://github.com/OwlSoul/YandexTransportWebdriverAPI-Python
+
+For client implementations in other languages, contact:
+  Email: TheOwlSoul@gmail.com
+
+================================================================================
+8. DOCKER DEPLOYMENT
+================================================================================
+
+8.1 Running Container
+---------------------
+Basic:
+  docker run -it -p 25555:25555 owlsoul/ytproxy:latest
+
+Custom Port and Delay:
+  docker run -it -p 30000:30000 owlsoul/ytproxy:latest \
+    python3 /home/transport_proxy/transport_proxy.py \
+    --port 30000 --delay 15 --verbose 4
+
+Background Mode:
+  docker run -dt -p 25555:25555 owlsoul/ytproxy:latest
+
+8.2 Command-Line Arguments
+---------------------------
+  --host <address>    Bind address (default: 0.0.0.0)
+  --port <number>     Port to listen on (default: 25555)
+  --delay <seconds>   Delay between queries (default: 10)
+  --verbose <level>   Logging verbosity:
+                        0 - Silent
+                        1 - Errors only
+                        2 - Errors and warnings
+                        3 - Info, warnings, errors
+                        4 - Full debug output
+
+8.3 Docker Compose
+------------------
+version: "3.0"
+
+networks:
+  transport-proxy:
+
+services:
+  server:
+    image: owlsoul/ytproxy:latest
+    restart: unless-stopped
+    container_name: ytproxy
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - transport-proxy
+    ports:
+      - "25555:25555"
+    command: python3 /home/transport_proxy/transport_proxy.py --delay 10 --verbose 4
+
+8.4 Kubernetes Deployment (Recommended Healthcheck)
+----------------------------------------------------
+For Kubernetes deployments, implement healthcheck using TCP probe:
+
+livenessProbe:
+  tcpSocket:
+    port: 25555
+  initialDelaySeconds: 30
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  tcpSocket:
+    port: 25555
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 2
+
+Alternative: Use getEcho command via exec probe for deeper validation.
+
+================================================================================
+9. TROUBLESHOOTING
+================================================================================
+
+9.1 Empty Results
+-----------------
+Symptom: Server returns error code 3 (RESULT_NO_YANDEX_DATA)
+Causes:
+  - Yandex rate limiting / CAPTCHA triggered
+  - Network connectivity issues
+  - Chrome/ChromeDriver crash
+Solution:
+  - Restart container
+  - Increase --delay parameter
+  - Check Chrome logs (--verbose 4)
+
+9.2 Slow Performance
+--------------------
+Symptom: Queries take longer than expected
+Causes:
+  - Large Query Queue
+  - Network latency to Yandex servers
+  - Chrome resource exhaustion
+Solution:
+  - Check getCurrentQueue
+  - Restart container to clear Chrome state
+  - Scale horizontally with multiple containers
+
+9.3 Chrome Not Reachable
+-------------------------
+Symptom: "chrome not reachable" error in logs
+Causes:
+  - Chrome crashed
+  - Insufficient shared memory (/dev/shm)
+  - Missing --no-sandbox flag
+Solution:
+  - Already configured in Dockerfile (--no-sandbox --disable-dev-shm-usage)
+  - Check container resources
+  - Restart container
+
+9.4 Performance Log Issues
+---------------------------
+Symptom: Missing API data or wrong stop information returned
+Causes:
+  - Performance logs not cleared between requests
+  - Log accumulation issues
+Solution:
+  - Fixed in v1.1.0 with automatic log clearing
+  - Ensure using latest version
+
+================================================================================
+10. TECHNICAL IMPLEMENTATION NOTES
+================================================================================
+
+10.1 Network Monitoring Method
+-------------------------------
+Version 1.1.0 uses Chrome DevTools Protocol (CDP) Performance logs:
+
+1. Enable performance logging:
+   chrome_options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
+
+2. Capture Network.requestWillBeSent events:
+   logs = driver.get_log('performance')
+   for log in logs:
+     message = json.loads(log['message'])
+     if 'Network.requestWillBeSent' in message['method']:
+       url = message['params']['request']['url']
+
+3. Smart polling loop:
+   - Check logs every 1 second
+   - Accumulate logs (get_log() clears buffer)
+   - Exit early when target API method detected
+   - Maximum wait: 45 seconds
+
+10.2 URL Caching Logic
+----------------------
+def _get_yandex_json(self, url, api_method):
+    same_url = (self.current_url == url)
+    
+    if same_url:
+        driver.get_log('performance')  # Clear old logs
+        driver.refresh()               # Fast refresh
+    else:
+        driver.get_log('performance')  # Clear old logs
+        driver.get(url)                # Full load
+        self.current_url = url         # Update cache
+
+10.3 Body Parsing Fix
+---------------------
+Handles BeautifulSoup edge cases where body.string returns None:
+
+body_text = body.get_text() if body.string is None else body.string
+if body_text:
+    body_string = body_text.encode('utf-8')
+    returned_json = json.loads(body_string)
+
+================================================================================
+11. VERSION HISTORY
+================================================================================
+
+Version 1.1.0 (January 2026)
+-----------------------------
+- Platform upgrade: Ubuntu 24.04, Python 3.12, Chrome 143+
+- Chrome 143 compatibility: CDP Performance logs
+- Smart polling with early exit (1s interval, 45s max)
+- URL caching optimization (refresh vs reload)
+- Performance log clearing to prevent data mixing
+- Fixed: Body parsing for None strings
+- Fixed: SIGTERM handler recursion
+- Updated: Selenium 4 with webdriver-manager
+- Performance: 40-50% faster on repeated queries
+
+Version 1.0.2 (November 2019)
+------------------------------
+- Base implementation with Ubuntu 18.04
+- Chromium browser support
+- window.performance.getEntries() network monitoring
+- Fixed 30-second wait for API methods

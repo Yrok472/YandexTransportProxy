@@ -15,4 +15,4 @@ services:
       - transport-proxy
     ports:
       - "25555:25555"
-    command: ./transport_proxy.py --delay 10 --verbose 4
+    command: python3 /home/transport_proxy/transport_proxy.py --delay 10 --verbose 4

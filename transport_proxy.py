@@ -8,9 +8,9 @@ Chromium browser.
 # NOTE: This project uses camelCase for function names. While PEP8 recommends using snake_case for these,
 #       the project in fact implements the "quasi-API" for Yandex Masstransit, where names are in camelCase,
 #       for example, get_stop_info. Correct naming for this function according to PEP8 would be get_stop_info.
-#       Thus, the desision to use camelCase was made. In fact, there are a bunch of python projects which use
+#       Thus, the decision to use camelCase was made. In fact, there are a bunch of python projects which use
 #       camelCase, like Robot Operating System.
-#       I also personally find camelCase more pretier than the snake_case.
+#       I also personally find camelCase more prettier than the snake_case.
 
 __author__ = "Yury D."
 __credits__ = ["Yury D.", "Pavel Lutskov", "Yury Alexeev"]
@@ -462,7 +462,7 @@ class Application:
         :return:
         """
         self.log.info("SIGTERM received! Terminating the program...")
-        self.sigterm_handler(_signal, _time)
+        self.sigint_handler(_signal, _time)
 
     def sigint_handler(self, _signal, _time):
         """
@@ -504,7 +504,7 @@ class Application:
 
         while self.is_running:
             # Checking if Executor Thread is dead.
-            if not self.executor_thread.isAlive():
+            if not self.executor_thread.is_alive():
                 self.log.error("Executor thread is dead. Terminating the program.")
                 self.is_running = False
                 break
@@ -746,7 +746,7 @@ class Application:
         self.executor_thread.start()
 
         # Calling Yandex Transport API Core
-        self.core = YandexTransportCore()
+        self.core = YandexTransportCore(self.log.verbose)
         self.log.info("Starting ChromeDriver...")
         self.core.start_webdriver()
         self.log.info("ChromeDriver started successfully!")

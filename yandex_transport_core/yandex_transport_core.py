@@ -8,7 +8,7 @@ It uses Selenium with ChromeDriver and gets Yandex Transport API JSON responses.
 # NOTE: This project uses camelCase for function names. While PEP8 recommends using snake_case for these,
 #       the project in fact implements the "quasi-API" for Yandex Masstransit, where names are in camelCase,
 #       for example, get_stop_info. Correct naming for this function according to PEP8 would be get_stop_info.
-#       Thus, the desision to use camelCase was made. In fact, there are a bunch of python projects which use
+#       Thus, the decision to use camelCase was made. In fact, there are a bunch of python projects which use
 #       camelCase, like Robot Operating System.
 #       I also personally find camelCase more prettier than the snake_case.
 
@@ -19,7 +19,10 @@ import io
 import json
 import selenium
 from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
+from .logger import Logger
 
 class YandexTransportCore:
     """
@@ -33,14 +36,18 @@ class YandexTransportCore:
     RESULT_JSON_PARSE_ERROR = 4
     RESULT_GET_ERROR = 5
 
-    def __init__(self):
+    def __init__(self, log_level=None):
         self.driver = None
+        self.log = Logger(log_level) if log_level is not None else None
 
         # Count of network queries executed so far, the idea is to restart the browser if it's too big.
         self.network_queries_count = 0
 
         # ChromeDriver location. They changed it a lot, by the way.
         self.chrome_driver_location = "/usr/bin/chromedriver"
+        
+        # Cache currently loaded URL to optimize repeated queries
+        self.current_url = None
 
     def start_webdriver(self):
         """
@@ -52,11 +59,14 @@ class YandexTransportCore:
         chrome_options.add_argument("--incognito")
         # These two are basically needed for Chromium to run inside docker container.
         chrome_options.add_argument('--no-sandbox')
-        # Next line causes selenium error WebDriverException: Message: chrome not reachable" inside Docker container.
-        # Transport Proxy seems to work without it, --no-sandbox only is enough.
-        # Left here as s reminder
-        # chrome_options.add_argument('--disable-dev-shm-usage')
-        self.driver = webdriver.Chrome(self.chrome_driver_location, options=chrome_options)
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        
+        # Enable performance logging for network requests
+        chrome_options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
+        
+        # Use webdriver-manager to automatically download and manage chromedriver
+        service = Service(ChromeDriverManager().install())
+        self.driver = webdriver.Chrome(service=service, options=chrome_options)
 
     def stop_webdriver(self):
         """
@@ -97,22 +107,43 @@ class YandexTransportCore:
 
     def get_chromium_networking_data(self):
         """
-        Gets "Network" data from Developer tools of Chromium Browser
-        :return: JSON containing data from "Network" tab
+        Gets "Network" data from Chrome Performance logs
+        :return: List containing network requests data
         """
-        # Script to get Network data from Developer tools, huge thanks to this link:
-        # https://stackoverflow.com/questions/20401264/how-to-access-network-panel-on-google-chrome-developer-tools-with-selenium
-        script = "var performance = window.performance || window.mozPerformance || window.msPerformance || " \
-                 "window.webkitPerformance || {}; var network = performance.getEntries() || {}; return network;"
-        data = self.driver.execute_script(script)
-
-        # They output network data in "kinda-JSON" with single quites instead of double ones.
-        # We used this thing before, which was unreliable in the end
-        # result_json = str(data).replace("'", '"')
-        # Now we're just using this thing, which is probably VERY dangerous, but we don't care =)
-        parsed_data = eval(str(data))
-
-        return parsed_data
+        try:
+            # Get performance logs from Chrome
+            logs = self.driver.get_log('performance')
+            
+            network_data = []
+            for log_entry in logs:
+                try:
+                    log_message = json.loads(log_entry['message'])
+                    message = log_message.get('message', {})
+                    method = message.get('method', '')
+                    
+                    # Filter only network requests
+                    if 'Network.requestWillBeSent' in method:
+                        params = message.get('params', {})
+                        request = params.get('request', {})
+                        url = request.get('url', '')
+                        
+                        if url:
+                            network_data.append({
+                                'name': url,
+                                'entryType': 'resource'
+                            })
+                except (json.JSONDecodeError, KeyError, TypeError) as e:
+                    # Skip malformed log entries
+                    continue
+            
+            if self.log:
+                self.log.debug(f"Found {len(network_data)} network entries")
+            
+            return network_data if network_data else []
+        except Exception as e:
+            if self.log:
+                self.log.error(f"Failed to get network data: {e}")
+            return []
 
     # ----                               MASTER FUNCTION TO GET YANDEX API DATA                                   ---- #
 
@@ -125,25 +156,120 @@ class YandexTransportCore:
         :return: array of huge json data, error code
         """
 
-        print("API Method:", api_method)
-        print("URL", url)
+        if self.log:
+            self.log.debug(f"API Method: {api_method}")
+            self.log.debug(f"URL: {url}")
 
         result_list = []
 
         if self.driver is None:
             return result_list, self.RESULT_WEBDRIVER_NOT_RUNNING
-        try:
-            self.driver.get(url)
-        except selenium.common.exceptions.WebDriverException as e:
-            print("Selenium exception (_get_yandex_json):", e)
-            return None, self.RESULT_GET_ERROR
+        
+        # Check if we're requesting the same URL as before (optimization)
+        same_url = (self.current_url == url)
+        
+        if same_url:
+            if self.log:
+                self.log.info(f"URL already loaded, refreshing page for fresh data...")
+            # Clear old logs before refresh
+            try:
+                self.driver.get_log('performance')
+                if self.log:
+                    self.log.debug("Cleared old performance logs before refresh")
+            except Exception as e:
+                if self.log:
+                    self.log.warning(f"Failed to clear performance logs: {e}")
+            # Refresh page to get fresh data (faster than full reload)
+            try:
+                self.driver.refresh()
+            except selenium.common.exceptions.WebDriverException as e:
+                if self.log:
+                    self.log.error(f"Selenium exception (refresh): {e}")
+                return None, self.RESULT_GET_ERROR
+        else:
+            if self.log:
+                self.log.info(f"Loading new URL: {url}")
+            # Clear old performance logs before loading new URL to avoid mixing old and new data
+            try:
+                self.driver.get_log('performance')  # Read and discard old logs
+                if self.log:
+                    self.log.debug("Cleared old performance logs before loading new URL")
+            except Exception as e:
+                if self.log:
+                    self.log.warning(f"Failed to clear performance logs: {e}")
+            
+            try:
+                self.driver.get(url)
+                self.current_url = url  # Update cached URL
+            except selenium.common.exceptions.WebDriverException as e:
+                if self.log:
+                    self.log.error(f"Selenium exception (_get_yandex_json): {e}")
+                return None, self.RESULT_GET_ERROR
 
-        # OK, now Yandex is not supplying us with getStopInfo here, how about we wait for a bit (dirty hack)
-        print("Sleeping 30 seconds, dirty hack to get getStopInfo appear")
-        time.sleep(30)        
+        # Wait for specific API methods to appear in performance logs (with timeout)
+        # Accumulate all logs during polling since get_log() clears them
+        if self.log:
+            self.log.info(f"Waiting for API methods {api_method} to appear in network logs...")
+        
+        max_wait = 45
+        check_interval = 1
+        waited = 0
+        api_found = False
+        accumulated_logs = []
+        
+        while waited < max_wait:
+            time.sleep(check_interval)
+            waited += check_interval
+            
+            # Check if any of the target API methods appeared in performance logs
+            try:
+                logs = self.driver.get_log('performance')
+                accumulated_logs.extend(logs)  # Accumulate logs since get_log() clears them
+                
+                for log_entry in logs:
+                    try:
+                        log_message = json.loads(log_entry['message'])
+                        message = log_message.get('message', {})
+                        if 'Network.requestWillBeSent' in message.get('method', ''):
+                            url = message.get('params', {}).get('request', {}).get('url', '')
+                            # Check if any of the target API methods is in this URL
+                            for method in api_method:
+                                if method in url:
+                                    api_found = True
+                                    if self.log:
+                                        self.log.info(f"Found {method} after {waited} seconds")
+                                    break
+                            if api_found:
+                                break
+                    except (json.JSONDecodeError, KeyError, TypeError):
+                        continue
+                
+                if api_found:
+                    break
+            except Exception as e:
+                if self.log:
+                    self.log.warning(f"Error checking performance logs: {e}")
+        
+        if not api_found and self.log:
+            self.log.warning(f"API methods {api_method} not found after {waited} seconds, proceeding anyway")
 
-        network_data = self.get_chromium_networking_data()
-        print(network_data)
+        # Parse accumulated logs to extract network data
+        network_data = []
+        for log_entry in accumulated_logs:
+            try:
+                log_message = json.loads(log_entry['message'])
+                message = log_message.get('message', {})
+                if 'Network.requestWillBeSent' in message.get('method', ''):
+                    url = message.get('params', {}).get('request', {}).get('url', '')
+                    if url:
+                        network_data.append({'name': url, 'entryType': 'resource'})
+            except (json.JSONDecodeError, KeyError, TypeError):
+                continue
+        
+        if self.log:
+            self.log.debug(f"Found {len(network_data)} network entries from accumulated logs")
+        if self.log:
+            self.log.debug(f"Network data: {network_data}")
 
         # Loading Network Data to JSON
         #try:
@@ -156,17 +282,23 @@ class YandexTransportCore:
         last_query = []
 
         self.network_queries_count = 0
+        
+        # DEBUG: Log all masstransit API calls
+        if self.log:
+            masstransit_urls = [entry['name'] for entry in network_data if 'masstransit' in entry['name'].lower()]
+            if masstransit_urls:
+                self.log.debug(f"Found {len(masstransit_urls)} masstransit API calls:")
+                for mt_url in masstransit_urls:
+                    self.log.debug(f"  - {mt_url}")
+        
         for entry in network_data:
             self.network_queries_count += 1
-            if not url_reached:
-                if entry['name'] == url:
-                    url_reached = True
-                    continue
-            else:
-                for method in api_method:
-                    res = re.match(".*" + method + ".*", str(entry['name']))
-                    if res is not None:
-                        last_query.append({"url": entry['name'], "method": method})
+            # Check if this entry matches any of the target API methods
+            for method in api_method:
+                res = re.match(".*" + method + ".*", str(entry['name']))
+                if res is not None:
+                    last_query.append({"url": entry['name'], "method": method})
+                    break  # Found match, no need to check other methods for this entry
 
         # Getting last API query results from cache by executing it again in the browser
         if last_query:                    # Same meaning as in "if len(last_query) > 0:"
@@ -175,8 +307,9 @@ class YandexTransportCore:
                 try:
                     self.driver.get(query['url'])
                 except selenium.common.exceptions.WebDriverException as e:
-                    print("Your favourite error message: THIS SHOULD NOT HAPPEN!")
-                    print("Selenium exception (_get_yandex_json):", e)
+                    if self.log:
+                        self.log.error("Your favourite error message: THIS SHOULD NOT HAPPEN!")
+                        self.log.error(f"Selenium exception (_get_yandex_json): {e}")
                     return None, self.RESULT_GET_ERROR
 
                 # Writing get_stop_info results to memory
@@ -188,17 +321,24 @@ class YandexTransportCore:
                 soup = BeautifulSoup(output_stream, 'lxml', from_encoding='utf-8')
                 body = soup.find('body')
                 if body is not None:
-                    body_string = body.string.encode('utf-8')
-                    try:
-                        returned_json = json.loads(body_string, encoding='utf-8')
+                    # Use get_text() instead of .string as .string can be None for complex body
+                    body_text = body.get_text() if body.string is None else body.string
+                    if body_text:
+                        body_string = body_text.encode('utf-8')
+                        try:
+                            returned_json = json.loads(body_string)
+                            data = {"url": query['url'],
+                                    "method": self.yandex_api_to_local_api(query['method']),
+                                    "error": "OK",
+                                    "data": returned_json}
+                        except ValueError as e:
+                            data = {"url": query['url'],
+                                    "method": self.yandex_api_to_local_api(query['method']),
+                                    "error": "Failed to parse JSON"}
+                    else:
                         data = {"url": query['url'],
                                 "method": self.yandex_api_to_local_api(query['method']),
-                                "error": "OK",
-                                "data": returned_json}
-                    except ValueError as e:
-                        data = {"url": query['url'],
-                                "method": self.yandex_api_to_local_api(query['method']),
-                                "error": "Failed to parse JSON"}
+                                "error": "Empty body content"}
                 else:
                     data = {"url": query['url'],
                             "method": self.yandex_api_to_local_api(query['method']),
@@ -218,6 +358,8 @@ class YandexTransportCore:
         Getting Yandex masstransit get_stop_info JSON results
         :param url: url of the stop (the URL you get when you click on the stop in the browser)
         :return: array of huge json data, error code
+        
+        Note: As of 2026, getStopInfo still exists but loads later (needs 5-10s wait)
         """
         return self._get_yandex_json(url, api_method=("maps/api/masstransit/getStopInfo",))
 

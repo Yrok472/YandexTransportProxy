@@ -109,10 +109,10 @@ pip3 install psycopg2-binary \
 **Примеры:**
 
 *Запуск докер-контейнера, порт 30000, полная отладка, задержка между запросами 30 секунд.*
-```docker run -it -p 30000:30000 owlsoul/ytproxy:latest "./transport_proxy --port 30000 --verbose 4 --delay 30"```
+```docker run -it -p 30000:30000 owlsoul/ytproxy:latest python3 /home/transport_proxy/transport_proxy.py --port 30000 --verbose 4 --delay 30```
 
 *Запуск докер-контейнера, порт 44444, только сообщения об ошибках и предупреждения, в фоне, не меняя порт самого прокси-сервера, а перенаправляя порт хоста через Docker, задержка между запросами 10 секунд.*
-```docker run -dt -p 44444:25555 owlsoul/ytproxy:latest "./transport_proxy --delay 10 --verbose 2"```
+```docker run -dt -p 44444:25555 owlsoul/ytproxy:latest python3 /home/transport_proxy/transport_proxy.py --delay 10 --verbose 2```
 
 *Запуск через docker-compose*
 
@@ -135,7 +135,7 @@ services:
       - transport-proxy
     ports:
       - "25555:25555"
-    command: ./transport_proxy.py --delay 10 --verbose 4
+    command: python3 /home/transport_proxy/transport_proxy.py --delay 10 --verbose 4
 
 ```
 Запуск:
@@ -147,7 +147,7 @@ docker-compose up -d
 
 Ждать запросов на 127.0.0.1, порт 35555, задержка между выполнением запросов 15 секунд, полный дебаг:
 
-```./transport-proxy --host 127.0.0.1 --port 35555 --delay 15 --verbose 4```
+```python3 transport_proxy.py --host 127.0.0.1 --port 35555 --delay 15 --verbose 4```
 
 ## Остановка прокси-сервера
 
