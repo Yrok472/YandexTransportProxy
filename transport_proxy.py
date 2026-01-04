@@ -172,6 +172,28 @@ class ExecutorThread(threading.Thread):
         except socket.error as e:
             self.app.log.error("Failed to send data to " + str(addr))
             self.app.log.error("Exception (send_message):" + str(e))
+    
+    def check_preload_cache(self, url):
+        """
+        Check if URL is in preload cache and return data if available
+        :param url: URL to check
+        :return: cached data or None
+        """
+        if self.app.preload_worker:
+            cached_data, cached_error = self.app.preload_worker.get_cached_data(url)
+            if cached_data is not None:
+                # Process cached data into same format as execute_get_info
+                payload = []
+                if cached_error == YandexTransportCore.RESULT_OK:
+                    for entry in cached_data:
+                        if entry.get('error') == 'OK':
+                            payload.append({'method': entry['method'], 'data': entry['data']})
+                        else:
+                            payload.append({'method': entry['method'], 'error': entry.get('error', 'Unknown error')})
+                
+                result = {'code': cached_error, 'payload': payload}
+                return json.dumps(result)
+        return None
 
     def execute_get_info(self, query):
         """
@@ -482,28 +504,252 @@ class PreloadWorker(threading.Thread):
         self.app.log.debug(f"Preloading stop: {stop['name']} ({url})")
         
         try:
-            # Check if tab exists for this URL
+            # Use the same approach as _get_yandex_json but in separate Chrome
+            # This avoids conflicts with main Chrome
+            
+            # Create or switch to tab
             if url not in self.core.tabs:
-                # Create new tab
                 self.core.create_tab_for_url(url)
             else:
-                # Switch to existing tab
                 self.core.switch_to_tab(url)
             
-            # Get fresh data
-            data, error = self.core._get_yandex_json(url, methods)
+            # Clear old logs
+            try:
+                self.core.driver.execute_cdp_cmd('Network.enable', {})
+                self.core.driver.get_log('performance')
+            except:
+                pass
             
-            # Update cache
-            self.update_cache(url, data, error)
-            
-            if error == 0:
-                self.app.log.debug(f"Successfully preloaded {stop['name']}: {len(data) if data else 0} items")
+            # Load or refresh page
+            if url not in self.core.tabs or self.core.current_url != url:
+                self.app.log.debug(f"Loading URL in new tab: {url}")
+                self.core.driver.get(url)
             else:
-                self.app.log.warning(f"Failed to preload {stop['name']}: error {error}")
+                self.app.log.debug(f"Refreshing existing tab for: {url}")
+                self.core.driver.refresh()
+            
+            self.app.log.debug(f"Page loaded, waiting for API calls...")
+            
+            # Wait for API to appear in logs
+            max_wait = 60  # Increased from 45 for low-CPU environments
+            check_interval = 1
+            waited = 0
+            api_found = False
+            api_urls = []
+            
+            while waited < max_wait:
+                time.sleep(check_interval)
+                waited += check_interval
+                
+                try:
+                    logs = self.core.driver.get_log('performance')
+                    for log_entry in logs:
+                        try:
+                            log_message = json.loads(log_entry['message'])
+                            message = log_message.get('message', {})
+                            if 'Network.requestWillBeSent' in message.get('method', ''):
+                                request_url = message.get('params', {}).get('request', {}).get('url', '')
+                                # Check if any target method in URL
+                                for method in methods:
+                                    if method in request_url:
+                                        api_urls.append({'url': request_url, 'method': method})
+                                        api_found = True
+                                        break
+                        except:
+                            continue
+                    
+                    if api_found:
+                        break
+                except:
+                    continue
+            
+            if not api_found:
+                self.app.log.warning(f"Timeout preloading {stop['name']}: API not found after {max_wait}s")
+                self.app.log.debug(f"Checked {waited} seconds, page may be loading slowly or blocked")
+                return None
+            
+            self.app.log.debug(f"Found {len(api_urls)} API calls for {stop['name']}")
+            
+            # Extract JSON by visiting API URLs directly (same as original code)
+            data = []
+            stop_tab = self.core.tabs.get(url)  # Save current stop's tab handle
+            
+            for api_call in api_urls:
+                try:
+                    self.core.driver.get(api_call['url'])
+                    # Parse response
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(self.core.driver.page_source, 'lxml', from_encoding='utf-8')
+                    body = soup.find('body')
+                    if body:
+                        body_text = body.get_text() if body.string is None else body.string
+                        if body_text:
+                            json_data = json.loads(body_text.encode('utf-8'))
+                            data.append({
+                                'url': api_call['url'],
+                                'method': self.core.yandex_api_to_local_api(api_call['method']),
+                                'error': 'OK',
+                                'data': json_data
+                            })
+                except Exception as e:
+                    self.app.log.debug(f"Failed to extract JSON for {api_call['url']}: {e}")
+                    continue
+            
+            # Restore original tab context for this stop
+            if stop_tab:
+                try:
+                    self.core.driver.switch_to.window(stop_tab)
+                except:
+                    pass
+            
+            if data:
+                self.app.log.debug(f"Successfully preloaded {stop['name']}: {len(data)} items")
+                return {'stop': stop, 'data': data, 'error': 0}
+            else:
+                self.app.log.warning(f"Failed to preload {stop['name']}: no data extracted")
+                return None
                 
         except Exception as e:
             self.app.log.error(f"Exception preloading {stop['name']}: {e}")
-            # Keep old cache if update fails
+            return None
+    
+    def preload_all_parallel(self):
+        """
+        Preload all stops in parallel using tabs
+        Much faster than sequential loading
+        """
+        self.app.log.debug(f"Starting parallel preload of {len(self.config['stops'])} stops")
+        
+        # Step 1: Create all tabs and start loading
+        tab_states = {}  # {url: {stop, tab_handle, status, start_time}}
+        
+        for stop in self.config['stops']:
+            url = stop['url']
+            try:
+                # Create or reuse tab
+                if url not in self.core.tabs:
+                    self.core.create_tab_for_url(url)
+                
+                # Switch to tab and start loading (non-blocking via execute_script)
+                self.core.switch_to_tab(url)
+                
+                # Clear logs
+                try:
+                    self.core.driver.execute_cdp_cmd('Network.enable', {})
+                    self.core.driver.get_log('performance')
+                except:
+                    pass
+                
+                # Start loading via JavaScript (non-blocking)
+                self.core.driver.execute_script(f"window.location.href = '{url}';")
+                
+                tab_states[url] = {
+                    'stop': stop,
+                    'tab_handle': self.core.tabs[url],
+                    'status': 'loading',
+                    'start_time': time.time(),
+                    'api_urls': [],
+                    'data': None
+                }
+                self.app.log.debug(f"Started loading tab: {stop['name']}")
+            except Exception as e:
+                self.app.log.error(f"Failed to start loading {stop['name']}: {e}")
+                continue
+        
+        # Step 2: Poll all tabs until all are done or timeout
+        max_total_wait = 120  # 2 minutes max for all tabs
+        check_interval = 0.5  # Check more frequently
+        start_time = time.time()
+        
+        while True:
+            elapsed = time.time() - start_time
+            if elapsed > max_total_wait:
+                self.app.log.warning(f"Parallel preload timeout after {max_total_wait}s")
+                break
+            
+            # Check if all done
+            loading_count = sum(1 for state in tab_states.values() if state['status'] == 'loading')
+            if loading_count == 0:
+                self.app.log.debug("All tabs loaded successfully")
+                break
+            
+            # Check each loading tab
+            for url, state in list(tab_states.items()):
+                if state['status'] != 'loading':
+                    continue
+                
+                # Timeout for individual tab
+                if time.time() - state['start_time'] > 60:
+                    self.app.log.warning(f"Timeout loading {state['stop']['name']}")
+                    state['status'] = 'timeout'
+                    continue
+                
+                try:
+                    # Switch to this tab
+                    self.core.driver.switch_to.window(state['tab_handle'])
+                    
+                    # Check performance logs for API calls
+                    logs = self.core.driver.get_log('performance')
+                    methods = tuple(f"maps/api/masstransit/{m}" for m in state['stop']['methods'])
+                    
+                    for log_entry in logs:
+                        try:
+                            log_message = json.loads(log_entry['message'])
+                            message = log_message.get('message', {})
+                            if 'Network.requestWillBeSent' in message.get('method', ''):
+                                request_url = message.get('params', {}).get('request', {}).get('url', '')
+                                for method in methods:
+                                    if method in request_url:
+                                        state['api_urls'].append({'url': request_url, 'method': method})
+                                        state['status'] = 'api_found'
+                                        self.app.log.debug(f"API found for {state['stop']['name']}")
+                                        break
+                        except:
+                            continue
+                    
+                except Exception as e:
+                    self.app.log.debug(f"Error checking tab {url}: {e}")
+                    continue
+            
+            time.sleep(check_interval)
+        
+        # Step 3: Extract data from all tabs that found API
+        results = []
+        for url, state in tab_states.items():
+            if state['status'] == 'api_found' and state['api_urls']:
+                try:
+                    data = []
+                    for api_call in state['api_urls']:
+                        try:
+                            self.core.driver.get(api_call['url'])
+                            from bs4 import BeautifulSoup
+                            soup = BeautifulSoup(self.core.driver.page_source, 'lxml', from_encoding='utf-8')
+                            body = soup.find('body')
+                            if body:
+                                body_text = body.get_text() if body.string is None else body.string
+                                if body_text:
+                                    json_data = json.loads(body_text.encode('utf-8'))
+                                    data.append({
+                                        'url': api_call['url'],
+                                        'method': self.core.yandex_api_to_local_api(api_call['method']),
+                                        'error': 'OK',
+                                        'data': json_data
+                                    })
+                        except Exception as e:
+                            self.app.log.debug(f"Failed to extract JSON: {e}")
+                            continue
+                    
+                    if data:
+                        self.update_cache(url, data, error=0)
+                        results.append({'stop': state['stop']['name'], 'items': len(data)})
+                        self.app.log.debug(f"Successfully preloaded {state['stop']['name']}: {len(data)} items")
+                except Exception as e:
+                    self.app.log.error(f"Failed to extract data for {state['stop']['name']}: {e}")
+        
+        total_time = time.time() - start_time
+        self.app.log.info(f"Parallel preload completed: {len(results)}/{len(self.config['stops'])} stops in {total_time:.1f}s")
+        return results
+
     
     def run(self):
         """
@@ -511,22 +757,14 @@ class PreloadWorker(threading.Thread):
         """
         self.app.log.info("PreloadWorker thread started")
         
-        # Initial load - create tabs for all stops
-        for stop in self.config['stops']:
-            self.preload_stop(stop)
-        
-        # Continuous refresh loop
+        # Use parallel loading strategy
         while self.is_running and self.app.is_running:
-            time.sleep(self.config['refresh_interval'])
+            # Load all stops in parallel
+            self.preload_all_parallel()
             
-            if not self.is_running:
-                break
-            
-            # Refresh all stops
-            for stop in self.config['stops']:
-                if not self.is_running:
-                    break
-                self.preload_stop(stop)
+            # Sleep before next refresh cycle
+            if self.is_running and self.app.is_running:
+                time.sleep(self.config['refresh_interval'])
         
         self.app.log.info("PreloadWorker thread terminated")
 
@@ -753,7 +991,35 @@ class Application:
                 self.watch_lock = True
 
             query_type, query_id, query_body = self.split_query(query)
+            
+            # FAST PATH: Check preload cache BEFORE putting into queue
+            # This avoids blocking cached requests behind slow non-cached requests
+            if self.preload_worker and self.executor_thread and query_type == 'getStopInfo':
+                cached_data = self.executor_thread.check_preload_cache(query_body)
+                if cached_data:
+                    # Send cached response immediately without queueing
+                    self.log.debug(f"Fast path: serving {query_id} from cache without queueing")
+                    response = {'id': query_id,
+                                'response': 'OK',
+                                'queue_position': -1}  # -1 indicates cache hit
+                    response_json = json.dumps(response)
+                    conn.send(bytes(response_json + '\n' + '\0', 'utf-8'))
+                    
+                    # Parse and send actual data entries
+                    try:
+                        result = json.loads(cached_data)
+                        payload = result.get('payload', [])
+                        if payload:
+                            payload[-1]['expect_more_data'] = False
+                        for entry in payload:
+                            entry_json = json.dumps(entry)
+                            self.log.debug("Sending (fast path): " + entry_json)
+                            conn.send(bytes(entry_json + '\n' + '\0', 'utf-8'))
+                    except Exception as e:
+                        self.log.error(f"Fast path error sending data: {e}")
+                    return
 
+            # SLOW PATH: Put into queue for normal processing
             self.queue_lock.acquire()
             self.query_queue.append({'type': query_type,
                                      'id': query_id,
