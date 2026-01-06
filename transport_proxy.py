@@ -476,7 +476,15 @@ class PreloadWorker(threading.Thread):
                 self.app.log.debug(f"Cache expired for {url} (age: {age:.1f}s)")
                 return None, None
             
-            self.app.log.debug(f"Cache hit for {url} (age: {age:.1f}s)")
+            # Extract stop ID for verification logging
+            stop_id = "unknown"
+            if entry['data'] and len(entry['data']) > 0 and 'data' in entry['data'][0]:
+                # Structure: data[0]['data'] contains the Yandex JSON which has data['data']['id']
+                inner_data = entry['data'][0]['data']
+                if isinstance(inner_data, dict) and 'data' in inner_data:
+                    stop_id = inner_data['data'].get('id', 'unknown')
+            
+            self.app.log.debug(f"Cache hit for {url} (age: {age:.1f}s, stop_id={stop_id})")
             return entry['data'], entry['error']
     
     def update_cache(self, url, data, error):
@@ -487,11 +495,20 @@ class PreloadWorker(threading.Thread):
         :param error: Error code
         """
         with self.cache_lock:
+            # Extract stop ID from data for better logging
+            stop_id = "unknown"
+            if data and len(data) > 0 and 'data' in data[0]:
+                # Structure: data[0]['data'] contains the Yandex JSON which has data['data']['id']
+                inner_data = data[0]['data']
+                if isinstance(inner_data, dict) and 'data' in inner_data:
+                    stop_id = inner_data['data'].get('id', 'unknown')
+            
             self.cache[url] = {
                 'data': data,
                 'timestamp': time.time(),
                 'error': error
             }
+            self.app.log.debug(f"Updated cache: URL={url}, stop_id={stop_id}, items={len(data) if data else 0}")
     
     def preload_stop(self, stop):
         """
@@ -714,37 +731,55 @@ class PreloadWorker(threading.Thread):
             time.sleep(check_interval)
         
         # Step 3: Extract data from all tabs that found API
-        results = []
+        # First, collect all API URLs with their associated stop URLs
+        api_to_stop_mapping = []  # [(api_url, method, stop_url, stop_name)]
         for url, state in tab_states.items():
             if state['status'] == 'api_found' and state['api_urls']:
-                try:
-                    data = []
-                    for api_call in state['api_urls']:
-                        try:
-                            self.core.driver.get(api_call['url'])
-                            from bs4 import BeautifulSoup
-                            soup = BeautifulSoup(self.core.driver.page_source, 'lxml', from_encoding='utf-8')
-                            body = soup.find('body')
-                            if body:
-                                body_text = body.get_text() if body.string is None else body.string
-                                if body_text:
-                                    json_data = json.loads(body_text.encode('utf-8'))
-                                    data.append({
-                                        'url': api_call['url'],
-                                        'method': self.core.yandex_api_to_local_api(api_call['method']),
-                                        'error': 'OK',
-                                        'data': json_data
-                                    })
-                        except Exception as e:
-                            self.app.log.debug(f"Failed to extract JSON: {e}")
-                            continue
-                    
-                    if data:
-                        self.update_cache(url, data, error=0)
-                        results.append({'stop': state['stop']['name'], 'items': len(data)})
-                        self.app.log.debug(f"Successfully preloaded {state['stop']['name']}: {len(data)} items")
-                except Exception as e:
-                    self.app.log.error(f"Failed to extract data for {state['stop']['name']}: {e}")
+                for api_call in state['api_urls']:
+                    api_to_stop_mapping.append({
+                        'api_url': api_call['url'],
+                        'method': api_call['method'],
+                        'stop_url': url,
+                        'stop_name': state['stop']['name']
+                    })
+        
+        # Now extract data for each API call, grouping by stop
+        stop_data = {}  # {stop_url: [data_items]}
+        stop_names = {}  # {stop_url: stop_name}
+        
+        for mapping in api_to_stop_mapping:
+            stop_url = mapping['stop_url']
+            stop_names[stop_url] = mapping['stop_name']
+            
+            if stop_url not in stop_data:
+                stop_data[stop_url] = []
+            
+            try:
+                self.core.driver.get(mapping['api_url'])
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(self.core.driver.page_source, 'lxml', from_encoding='utf-8')
+                body = soup.find('body')
+                if body:
+                    body_text = body.get_text() if body.string is None else body.string
+                    if body_text:
+                        json_data = json.loads(body_text.encode('utf-8'))
+                        stop_data[stop_url].append({
+                            'url': mapping['api_url'],
+                            'method': self.core.yandex_api_to_local_api(mapping['method']),
+                            'error': 'OK',
+                            'data': json_data
+                        })
+            except Exception as e:
+                self.app.log.debug(f"Failed to extract JSON for {mapping['stop_name']}: {e}")
+                continue
+        
+        # Now update cache for each stop with its own data
+        results = []
+        for stop_url, data in stop_data.items():
+            if data:
+                self.update_cache(stop_url, data, error=0)
+                results.append({'stop': stop_names[stop_url], 'items': len(data)})
+                self.app.log.debug(f"Successfully preloaded {stop_names[stop_url]}: {len(data)} items")
         
         total_time = time.time() - start_time
         self.app.log.info(f"Parallel preload completed: {len(results)}/{len(self.config['stops'])} stops in {total_time:.1f}s")
@@ -761,6 +796,19 @@ class PreloadWorker(threading.Thread):
         while self.is_running and self.app.is_running:
             # Load all stops in parallel
             self.preload_all_parallel()
+            
+            # Clear performance logs after each cycle to prevent memory buildup
+            try:
+                for url in self.config['stops']:
+                    url_key = url['url']
+                    if url_key in self.core.tabs:
+                        try:
+                            self.core.switch_to_tab(url_key)
+                            self.core.driver.get_log('performance')  # Clears logs
+                        except:
+                            pass
+            except Exception as e:
+                self.app.log.debug(f"Error clearing performance logs: {e}")
             
             # Sleep before next refresh cycle
             if self.is_running and self.app.is_running:

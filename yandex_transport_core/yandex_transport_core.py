@@ -65,6 +65,29 @@ class YandexTransportCore:
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
         
+        # Memory optimization options
+        chrome_options.add_argument('--disable-gpu')  # Disable GPU acceleration in headless mode
+        chrome_options.add_argument('--disable-software-rasterizer')  # Reduce memory usage
+        chrome_options.add_argument('--disable-extensions')  # No extensions
+        chrome_options.add_argument('--disable-background-networking')  # Reduce background activity
+        chrome_options.add_argument('--disable-background-timer-throttling')  # Better performance
+        chrome_options.add_argument('--disable-backgrounding-occluded-windows')  # Reduce memory for hidden tabs
+        chrome_options.add_argument('--disable-breakpad')  # Disable crash reporting
+        chrome_options.add_argument('--disable-component-extensions-with-background-pages')
+        chrome_options.add_argument('--disable-features=TranslateUI')  # Disable translation
+        chrome_options.add_argument('--disable-ipc-flooding-protection')  # Better performance in automation
+        chrome_options.add_argument('--disable-renderer-backgrounding')  # Keep renderer active
+        chrome_options.add_argument('--metrics-recording-only')  # Minimal metrics
+        chrome_options.add_argument('--mute-audio')  # No audio processing
+        chrome_options.add_argument('--no-first-run')  # Skip first run wizards
+        chrome_options.add_argument('--no-default-browser-check')  # Skip browser checks
+        chrome_options.add_argument('--autoplay-policy=user-gesture-required')  # No autoplay
+        chrome_options.add_argument('--disable-hang-monitor')  # Disable hang monitoring
+        chrome_options.add_argument('--disable-prompt-on-repost')  # No repost prompts
+        chrome_options.add_argument('--disable-sync')  # No sync
+        chrome_options.add_argument('--force-color-profile=srgb')  # Standard colors
+        chrome_options.add_argument('--password-store=basic')  # Basic password store
+        
         # Enable performance logging for network requests
         chrome_options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
         
